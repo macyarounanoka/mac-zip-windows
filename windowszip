@@ -1,0 +1,141 @@
+#!/usr/bin/php
+<?php
+class WindowsZip{
+    public $テキスト改行コンバート = true;
+    function windowsFileName( $utf8 , $isfile=true){ 
+        if( $isfile ){
+            if( mb_ereg("[\\\\/\:\*\?\"<>|]", $utf8) ){
+                throw new Exception("Windowsで利用できない文字が含まれたフォルダ名、ファイル名です。[${utf8}]",1);
+            }
+        }else{
+            if( mb_ereg("[\\\\\:\*\?\"<>|]", $utf8) ){
+                throw new Exception("Windowsで利用できない文字が含まれたフォルダ名、ファイル名です。[${utf8}]",1);
+            }
+        }
+        $ret = iconv( 'UTF-8-MAC', 'CP932//TRANSLIT', $utf8 );
+        if( $ret === false ){
+            $detailmsg = "";
+            for ( $i = 0; $i < mb_strlen( $utf8, 'utf8' ); $i++ ){ $c=mb_substr( $utf8, $i, 1, 'utf8'); $detailmsg .= $c ;if( iconv('UTF-8-MAC','CP932//TRANSLIT',$c) === false ){ $detailmsg .= "<=(NG)" ;  } }echo $detailmsg . PHP_EOL;
+            throw new Exception("Shift-JIS(CP932)に無い文字が含まれています".PHP_EOL."[${detailmsg}]",1);
+        }
+        return $ret;
+    }
+    function recursive( $folder, &$za, $exclusiveLength ){
+        $zipfolder = mb_substr($folder, $exclusiveLength, 
+            mb_strlen($folder,'utf8') - $exclusiveLength, 'utf8');
+        $sjis_folder = $this->windowsFileName($zipfolder, false );
+        $handle = opendir($folder); 
+        while (false !== ($file = readdir($handle)) ) { 
+            if( $file == '.' || $file == '..' || $file == '.DS_Store'){
+                continue;
+            }
+            $filename = $file;
+            $sjis_filename = $this->windowsFileName( $filename );
+            $filePath = "$folder/$filename"; 
+            $localPath = "${sjis_folder}/${sjis_filename}";
+            echo $zipfolder . " ..." . PHP_EOL;
+            if (is_file($filePath)) { 
+                $this->addFile( $za, $filePath, $localPath );
+            } elseif (is_dir($filePath)) { 
+                // Add sub-directory. 
+                $za->addEmptyDir($localPath); 
+                $this->recursive($filePath, $za, $exclusiveLength); 
+            } 
+        } 
+        closedir($handle); 
+
+    }
+    function addFile( &$za, $filePath, $localPath ){
+        if( $this->テキスト改行コンバート && preg_match("/\.txt$/", $filePath ) ){
+            echo $filename . " text convert lf -> crlf " . PHP_EOL;
+            $contents = file_get_contents( $filePath );
+            $contents = str_replace("\r", '', $contents );
+            $contents = str_replace("\n", "\r\n", $contents );
+            $za->addFromString( $localPath, $contents );
+        }else{
+            $za->addFile($filePath, $localPath); 
+        }
+    }
+    function single( &$za, $contentsfilepath ){
+        $pathInfo = pathinfo($contentsfilepath); 
+        $contentsfile = $pathInfo['basename']; 
+        $localfile = $this->windowsFileName($contentsfile);
+        $this->addFile( $za, $contentsfilepath, $localfile );
+
+    }
+    function escape_osascript( $txt ){
+        $txt = str_replace('\\', '\\\\', $txt) ;
+        $txt = str_replace('"', '\"', $txt) ;
+        return $txt;
+    }
+    public function showDialog( $title, $msg, $enableCancel=false ){
+        $array_button = array("OK");
+        if( $enableCancel ){ $array_button[] = "CANCEL"; }
+        $title = get_class($this) . " " . $this->escape_osascript($title);
+        $msg = $this->escape_osascript($msg);
+        $buttons = 'buttons {"' . implode('","', $array_button) . '"}';
+        $script = 'display dialog "'.$msg.'" with title "'.$title.'" '.$buttons.' default button "OK"';
+        $handle = popen("/usr/bin/osascript -e '".$script."' ", 'r');
+        $result = fgets($handle,256);
+        pclose($handle);
+        if( preg_match("/returned:OK/", $result) ){
+            return true;
+        }
+        return false;
+    }
+    public function reportNotification( $title, $message ){
+        $subtitle = get_class($this);
+        $script = 'display notification "'. $message .'" with title "'. $title .'" subtitle "'. $subtitle .'" sound name "Purr"';
+        system( "osascript -e '" . $script ."'" );  
+    }
+    public function Create($pathtofileorfolder, $pathtozipfile = false) { 
+        if( file_exists( $pathtofileorfolder ) == false ){
+             throw new Exception("フォルダまたはファイルが存在しません。圧縮する存在するフォルダ・ファイルを指定してください。".PHP_EOL."${path-to-fileorfolder}");
+        }
+        $realpath = realpath( $pathtofileorfolder );
+        $pathInfo = pathinfo($realpath); 
+        $parentPath = $pathInfo['dirname'];
+        $exclusiveLength = mb_strlen("$parentPath/",'utf8');
+        $dirName = $pathInfo['basename']; 
+        if( $pathtozipfile  == false ){
+            $pathtozipfile = $realpath . ".zip";
+        }
+        if( file_exists($pathtozipfile) ){
+            if( $this->showDialog("確認","同名ZIPファイルが存在します。".PHP_EOL.$pathtozipfile.PHP_EOL."[OK]で消去後、新規作成します。" . PHP_EOL."[CANCEL]で中止します。", true) ){
+                unlink( $pathtozipfile );
+            }else{
+                exit(0);
+                //throw new Exception( "ユーザーによるキャンセル ".$pathtozipfile );
+            }
+        }
+        $za = new ZipArchive(); 
+        try{
+            $za->open($pathtozipfile, ZIPARCHIVE::CREATE); 
+            if( is_dir( $realpath) ){
+                $za->addEmptyDir( $this->windowsFileName( $dirName ) ); 
+                $this->recursive( $realpath , $za, $exclusiveLength);
+            }
+            else{
+                $this->single( $za, $realpath );
+            }
+        }
+        finally{
+            $za->close(); 
+        }
+    } 
+}
+if( $argc == 1 ) {
+    return ;
+}
+try{
+    $zip = new WindowsZip();
+    //$zip->テキスト改行コンバート = false;
+    $zip->Create( $argv[1] );
+}
+catch(Exception $e ){
+    echo $e->getMessage() .PHP_EOL;
+    if( $e->getCode() == 1 ){
+        unlink($argv[1] . ".zip");
+    }
+    $zip->showDialog( "失敗しました",$e->getMessage() );
+}
